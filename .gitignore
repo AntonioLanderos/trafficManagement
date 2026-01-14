@@ -104,3 +104,13 @@ InitTestScene*.unity*
 **/[Oo]bj/
 **/[Ll]ogs/
 **/[Uu]ser[Ss]ettings/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+ENV/
+VENV/

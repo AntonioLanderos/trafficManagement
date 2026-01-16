@@ -3,7 +3,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
 
-# Importa tu modelo Mesa y clases de agentes
+# Importa modelo Mesa y clases de agentes
 from traffic_classic import TrafficModel, CarAgent, IntersectionAgent, RoadAgent
 
 # --- Estado global de simulación

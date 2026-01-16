@@ -10,6 +10,10 @@ Incluye:
 - Spawns en varias avenidas para que haya tráfico en varias áreas.
 """
 
+# TODO: reducir scope del proyecto 
+# TODO: mejorar agente Car para que utilice una implementacion de A*
+# TODO: reinforcement learning para semáforos inteligentes con base en tiempo de espera y densidad de tráfico
+
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple

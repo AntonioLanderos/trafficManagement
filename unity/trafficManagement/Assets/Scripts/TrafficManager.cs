@@ -10,7 +10,9 @@ public class TrafficManager : MonoBehaviour
 
     [Header("Prefabs")]
     public GameObject carPrefab;
+
     public GameObject trafficLightPrefab;
+
     public GameObject roadTilePrefab;
     public GameObject intersectionTilePrefab;
 
@@ -25,7 +27,13 @@ public class TrafficManager : MonoBehaviour
     public bool smooth = true;
     public float lerpSpeed = 12f;
 
-    // --- Runtime state
+    [Header("Lights (Directional)")]
+    public bool directionalLights = true;
+
+    // Qué tanto separar los indicadores EW/NS dentro de la intersección
+    public float lightSeparation = 0.45f;
+
+    // ---------------- Runtime state
     private bool mapBuilt = false;
     private Transform mapRoot;
     private Transform carsRoot;
@@ -34,7 +42,12 @@ public class TrafficManager : MonoBehaviour
     private readonly Dictionary<int, GameObject> carGO = new Dictionary<int, GameObject>();
     private readonly Dictionary<int, Vector3> carTargetPos = new Dictionary<int, Vector3>();
 
+    // Modo viejo (1 GO por celda light id)
     private readonly Dictionary<int, GameObject> lightGO = new Dictionary<int, GameObject>();
+
+    // Modo nuevo: 2 indicadores por intersección (EW y NS)
+    private readonly Dictionary<string, GameObject> lightEW = new Dictionary<string, GameObject>();
+    private readonly Dictionary<string, GameObject> lightNS = new Dictionary<string, GameObject>();
 
     // ---------------- DTOs (JsonUtility compatible) ----------------
 
@@ -211,7 +224,11 @@ public class TrafficManager : MonoBehaviour
             }
 
             UpdateCars(snap);
-            UpdateLights(snap);
+
+            if (directionalLights)
+                UpdateLightsDirectional(snap);
+            else
+                UpdateLightsLegacy(snap);
         }
     }
 
@@ -225,7 +242,7 @@ public class TrafficManager : MonoBehaviour
             return;
         }
 
-        // Intersections primero para que queden “encima” (puedes ajustar escala en prefab)
+        // Intersections primero
         if (map.intersections != null)
         {
             foreach (var c in map.intersections)
@@ -272,11 +289,10 @@ public class TrafficManager : MonoBehaviour
                 {
                     GameObject go = Instantiate(carPrefab, carsRoot);
                     go.name = $"Car_{c.id}";
-                    go.transform.position = target; // spawn at target
+                    go.transform.position = target;
                     carGO[c.id] = go;
                 }
 
-                // Rotación por dirección (E,W,N,S)
                 GameObject car = carGO[c.id];
                 if (car != null)
                 {
@@ -304,7 +320,7 @@ public class TrafficManager : MonoBehaviour
         }
     }
 
-    void UpdateLights(SnapshotDTO snap)
+    void UpdateLightsLegacy(SnapshotDTO snap)
     {
         if (trafficLightPrefab == null)
         {
@@ -320,7 +336,7 @@ public class TrafficManager : MonoBehaviour
             {
                 seen.Add(l.id);
 
-                Vector3 pos = GridToWorld(l.x, l.y) + new Vector3(0f, 0.5f, 0f); // un poquito arriba
+                Vector3 pos = GridToWorld(l.x, l.y) + new Vector3(0f, 0.5f, 0f);
                 if (!lightGO.ContainsKey(l.id) || lightGO[l.id] == null)
                 {
                     GameObject go = Instantiate(trafficLightPrefab, lightsRoot);
@@ -333,12 +349,10 @@ public class TrafficManager : MonoBehaviour
                     lightGO[l.id].transform.position = pos;
                 }
 
-                // Color según phase
                 ApplyLightVisual(lightGO[l.id], l.phase);
             }
         }
 
-        // Remover lights faltantes (si cambiara el mapa; normalmente no pasa)
         List<int> toRemove = new List<int>();
         foreach (var kv in lightGO)
         {
@@ -355,11 +369,121 @@ public class TrafficManager : MonoBehaviour
         }
     }
 
+    // ---------------- Lights: directional ----------------
+    // Agrupa los 4 lights (2x2) en una sola intersección y crea 2 indicadores: EW y NS
+
+    void UpdateLightsDirectional(SnapshotDTO snap)
+    {
+        // Si no hay prefab, usamos cubos automáticamente para testing
+        HashSet<string> seenKeys = new HashSet<string>();
+
+        if (snap.lights == null) return;
+
+        // Guardar phase por intersección
+        Dictionary<string, int> phaseByKey = new Dictionary<string, int>();
+        Dictionary<string, Vector3> centerByKey = new Dictionary<string, Vector3>();
+
+        foreach (var l in snap.lights)
+        {
+            string key = IntersectionKey2x2(l.x, l.y);
+            seenKeys.Add(key);
+
+            phaseByKey[key] = l.phase;
+
+            Vector2Int baseCell = IntersectionBaseCell2x2(l.x, l.y);
+
+            Vector3 center = GridToWorld(baseCell.x, baseCell.y);
+            center += new Vector3(cellSize * 0.5f, 0f, cellSize * 0.5f);
+            centerByKey[key] = center;
+        }
+
+        foreach (var kv in phaseByKey)
+        {
+            string key = kv.Key;
+            int phase = kv.Value;
+
+            Vector3 center = centerByKey[key];
+
+            // Separación visual para distinguir dirección
+            float sep = cellSize * lightSeparation;
+
+            // EW a la derecha del centro, NS arriba del centro (en Z)
+            // EW = sobre la horizontal (Z casi igual), NS = sobre la vertical (X casi igual)
+            Vector3 posEW = center + new Vector3(0f, 0.5f, sep);
+            Vector3 posNS = center + new Vector3(sep, 0.5f, 0f);
+
+
+            // EW indicator
+            if (!lightEW.ContainsKey(key) || lightEW[key] == null)
+            {
+                lightEW[key] = CreateLightGO($"LightEW_{key}");
+                lightEW[key].transform.SetParent(lightsRoot);
+            }
+            lightEW[key].transform.position = posEW;
+
+            // NS indicator
+            if (!lightNS.ContainsKey(key) || lightNS[key] == null)
+            {
+                lightNS[key] = CreateLightGO($"LightNS_{key}");
+                lightNS[key].transform.SetParent(lightsRoot);
+            }
+            lightNS[key].transform.position = posNS;
+
+            bool ewGreen = (phase == 0);
+            bool nsGreen = !ewGreen;
+
+            SetLightColor(lightEW[key], ewGreen ? Color.green : Color.red);
+            SetLightColor(lightNS[key], nsGreen ? Color.green : Color.red);
+        }
+    }
+
+    GameObject CreateLightGO(string name)
+    {
+        GameObject go;
+
+        if (trafficLightPrefab != null)
+        {
+            go = Instantiate(trafficLightPrefab);
+        }
+        else
+        {
+            go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            go.transform.localScale = new Vector3(0.6f, 0.6f, 0.6f);
+        }
+
+        go.name = name;
+        return go;
+    }
+
+    void SetLightColor(GameObject go, Color c)
+    {
+        if (go == null) return;
+
+        var mr = go.GetComponentInChildren<MeshRenderer>();
+        if (mr != null && mr.material != null)
+        {
+            mr.material.color = c;
+        }
+    }
+
+    string IntersectionKey2x2(int x, int y)
+    {
+        int bx = (x % 2 == 0) ? x : x - 1;
+        int by = (y % 2 == 0) ? y : y - 1;
+        return $"{bx}_{by}";
+    }
+
+    Vector2Int IntersectionBaseCell2x2(int x, int y)
+    {
+        int bx = (x % 2 == 0) ? x : x - 1;
+        int by = (y % 2 == 0) ? y : y - 1;
+        return new Vector2Int(bx, by);
+    }
+
     // ---------------- Helpers ----------------
 
     Vector3 GridToWorld(int x, int y)
     {
-        // Mapea (x,y) del grid Mesa a Unity (X,Z)
         float wx = worldOrigin.x + x * cellSize;
         float wz = worldOrigin.z + y * cellSize;
         float wy = worldOrigin.y;
@@ -368,9 +492,7 @@ public class TrafficManager : MonoBehaviour
 
     Quaternion DirToRotation(string dir)
     {
-        // Ajusta si tu modelo apunta a otra dirección “forward”
-        // Asumimos que el carro mira hacia +Z por defecto:
-        // N = +Z, S = -Z, E = +X, W = -X
+        // el carro mira hacia +Z por defecto
         switch (dir)
         {
             case "N": return Quaternion.Euler(0f, 0f, 0f);
@@ -385,10 +507,8 @@ public class TrafficManager : MonoBehaviour
     {
         if (go == null) return;
 
-        // 0 => verde, 1 => rojo
         Color c = (phase == 0) ? Color.green : Color.red;
 
-        // Cambia el color del material si hay MeshRenderer
         var mr = go.GetComponentInChildren<MeshRenderer>();
         if (mr != null && mr.material != null)
         {
@@ -398,7 +518,7 @@ public class TrafficManager : MonoBehaviour
 
     Vector3 ApplyLaneOffset(Vector3 pos, string dir)
     {
-        float off = cellSize * 0.25f; // con cellSize=2 => 0.5
+        float off = cellSize * 0.25f;
         switch (dir)
         {
             case "E": pos.z += off; break;
@@ -408,5 +528,4 @@ public class TrafficManager : MonoBehaviour
         }
         return pos;
     }
-
 }

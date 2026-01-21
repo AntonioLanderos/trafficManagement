@@ -1,5 +1,5 @@
 """
-traffic_classic.py  (Mesa 2.x / Python 3.9 compatible)
+traffic_classic.py  (Mesa 2.4 / Python 3.9 compatible)
 
 Incluye:
 - Zonas coloreadas (CENTRO/RESIDENCIAL/INDUSTRIAL/OTRA) en las celdas que son calle.  (aún falta mejorar la representación visual)
@@ -479,7 +479,7 @@ def run_server():
     server = ModularServer(
         TrafficModel,
         [hud, grid, chart],
-        "Traffic Multiagent Prototype (Mesa 2.x Classic Viz, multi-zona)",
+        "Traffic Multiagent Prototype (Mesa 2.4 Classic Viz, multi-zona)",
         {"width": width, "height": height, "seed": 42, "base_spawn_scale": 1.0},
     )
     server.port = 8521

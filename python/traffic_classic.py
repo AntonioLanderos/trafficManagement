@@ -11,7 +11,7 @@ Incluye:
 """
 
 # TODO: reducir scope del proyecto 
-# TODO: mejorar agente Car para que utilice una implementacion de A*
+# TODO: mejorar agente Car para que utilice una implementacion de A* (revisar si vale la pena porque en la visualización no se ven los giros)
 # TODO: reinforcement learning para semáforos inteligentes con base en tiempo de espera y densidad de tráfico
 
 from __future__ import annotations
@@ -440,6 +440,7 @@ def agent_portrayal(agent):
     return {}
 
 
+# TODO: añadir unidades a las métricas del HUD
 class HUD(TextElement):
     def render(self, model: TrafficModel):
         h = model.minute_of_day // 60
@@ -479,7 +480,7 @@ def run_server():
     server = ModularServer(
         TrafficModel,
         [hud, grid, chart],
-        "Traffic Multiagent Prototype (Mesa 2.4 Classic Viz, multi-zona)",
+        "Traffic Multiagent Prototype",
         {"width": width, "height": height, "seed": 42, "base_spawn_scale": 1.0},
     )
     server.port = 8521

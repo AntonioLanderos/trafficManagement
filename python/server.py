@@ -41,6 +41,9 @@ def build_snapshot(model: TrafficModel, tick: int) -> dict:
         "height": int(model.height),
         "cars": cars,
         "lights": lights,
+        "count_cars": int(model.count_cars()),
+        "avg_speed": round(model.avg_speed(), 2),
+        "avg_wait": round(model.avg_wait(), 1),
     }
 
 

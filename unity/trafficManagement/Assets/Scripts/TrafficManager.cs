@@ -27,6 +27,9 @@ public class TrafficManager : MonoBehaviour
     public bool smooth = true;
     public float lerpSpeed = 12f;
 
+    [Header("UI")]
+    public TMPro.TextMeshProUGUI metricsText;
+
     [Header("Lights (Directional)")]
     public bool directionalLights = true;
 
@@ -78,6 +81,9 @@ public class TrafficManager : MonoBehaviour
         public int height;
         public CarDTO[] cars;
         public LightDTO[] lights;
+        public int count_cars;
+        public float avg_speed;
+        public float avg_wait;
     }
 
     [System.Serializable]
@@ -223,6 +229,9 @@ public class TrafficManager : MonoBehaviour
                 yield break;
             }
 
+            //Debug.Log($"Metrics - Cars: {snap.count_cars} | AvgSpeed: {snap.avg_speed} | AvgWait: {snap.avg_wait}");
+
+            UpdateMetricsUI(snap);
             UpdateCars(snap);
 
             if (directionalLights)
@@ -265,6 +274,14 @@ public class TrafficManager : MonoBehaviour
     }
 
     // ---------------- Entity updates ----------------
+    void UpdateMetricsUI(SnapshotDTO snap)
+    {
+        if (metricsText == null) return;
+
+        metricsText.text = $"Autos: {snap.count_cars}\n" +
+                           $"Vel. Promedio: {snap.avg_speed:F2}\n" +
+                           $"Espera Promedio: {snap.avg_wait:F1} ticks";
+    }
 
     void UpdateCars(SnapshotDTO snap)
     {

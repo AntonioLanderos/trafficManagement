@@ -10,10 +10,6 @@ Incluye:
 - Spawns en varias avenidas para que haya tráfico en varias áreas.
 """
 
-# TODO: reducir scope del proyecto 
-# TODO: mejorar agente Car para que utilice una implementacion de A* (revisar si vale la pena porque en la visualización no se ven los giros)
-# TODO: reinforcement learning para semáforos inteligentes con base en tiempo de espera y densidad de tráfico
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -25,6 +21,9 @@ from mesa.datacollection import DataCollector
 
 from mesa.visualization.modules import CanvasGrid, ChartModule, TextElement
 from mesa.visualization.ModularVisualization import ModularServer
+
+import numpy as np
+import matplotlib.pyplot as plt
 
 DIRECTIONS = {
     "E": (1, 0),
@@ -192,6 +191,7 @@ class TrafficModel(Model):
     """
     def __init__(self, width=30, height=30, seed=42, base_spawn_scale=1.0):
         super().__init__()
+        self.seconds_per_tick = 10.0  # conversion para metricas
         self.random.seed(seed)
 
         self.width = width
@@ -211,6 +211,18 @@ class TrafficModel(Model):
             Zone("OTRA",         0, 20,  9, 29, base_spawn=0.04),
         ]
 
+        # modo de control para los semáforos
+        # fixed -> ciclo fijo
+        # adaptive -> ajustable
+        self.signal_mode = "fixed"
+
+        # vars globales para control de unity
+        self.light_cycle = 12
+        self.min_green_time = 6
+        self.max_green_time = 14
+        self.switch_threshold = 2 # diferencia de colas para cambiar
+        self.detection_range = 8 # numero de celdas hacia atras para detectar autos
+
         # posiciones (avenidas)
         self._define_avenues()
         self._build_roads_and_intersections()
@@ -220,6 +232,7 @@ class TrafficModel(Model):
                 "CarsActive": lambda m: m.count_cars(),
                 "AvgSpeed": lambda m: m.avg_speed(),
                 "AvgWait": lambda m: m.avg_wait(),
+                "AvgWaitSeconds": lambda m: m.avg_wait_seconds(),
                 "PeakFactor": lambda m: m.peak_factor(),
                 "DensityCentro": lambda m: m.zone_density("CENTRO"),
                 "DensityRes": lambda m: m.zone_density("RESIDENCIAL"),
@@ -310,7 +323,7 @@ class TrafficModel(Model):
                 for pos in cells:
                     if 0 <= pos[0] < self.width and 0 <= pos[1] < self.height:
                         self._place(
-                            IntersectionAgent(self.next_id(), self, has_traffic_light=is_major, cycle=12, green_dirs=("E", "W")),
+                            IntersectionAgent(self.next_id(), self, has_traffic_light=is_major, cycle=self.light_cycle, green_dirs=("E", "W")),
                             pos,
                         )
 
@@ -379,6 +392,139 @@ class TrafficModel(Model):
                 self.grid.place_agent(car, pos)
                 self.schedule.add(car)
 
+    def _intersection_groups(self):
+        """
+        Agrupa los 4 IntersectionAgent de cada cruce real (2x2) usando la geometria
+        de carriles definida por h_avenues y v_avenues (NO paridad x%2/y%2).
+        Key = (xN, yE) donde:
+        - carril N esta en xN, carril S en xN+1
+        - carril E esta en yE, carril W en yE-1
+        """
+        groups = {}
+
+        for a in self.schedule.agents:
+            if not (isinstance(a, IntersectionAgent) and a.pos is not None and a.has_traffic_light):
+                continue
+
+            x, y = a.pos
+
+            # hallar xN tal que x pertenece a {xN, xN+1}
+            xN = None
+            if x in self.v_avenues:
+                xN = x
+            elif (x - 1) in self.v_avenues:
+                xN = x - 1
+            else:
+                continue
+
+            # hallar yE tal que y pertenece a {yE, yE-1}
+            yE = None
+            if y in self.h_avenues:
+                yE = y
+            elif (y + 1) in self.h_avenues:
+                yE = y + 1
+            else:
+                continue
+
+            key = (xN, yE)
+            groups.setdefault(key, []).append(a)
+
+        return groups
+
+
+    def _count_queue_for_group(self, key):
+        """
+        Cuenta demanda horizontal vs vertical alrededor del cruce real.
+        key=(xN,yE) con:
+        xS=xN+1, yW=yE-1
+        """
+        xN, yE = key
+        xS = xN + 1
+        yW = yE - 1
+        L = self.detection_range
+
+        def cars_in_cells(cells):
+            cnt = 0
+            for (cx, cy) in cells:
+                if self.grid.out_of_bounds((cx, cy)):
+                    continue
+                for a in self.grid.get_cell_list_contents([(cx, cy)]):
+                    if isinstance(a, CarAgent):
+                        cnt += 1
+            return cnt
+
+        # Entra E por (xN,yE) viniendo desde la izquierda en yE (carril E)
+        # Entra W por (xS,yW) viniendo desde la derecha en yW (carril W)
+        horiz_cells = []
+        horiz_cells += [(xN - i, yE) for i in range(1, L + 1)]  # approach E
+        horiz_cells += [(xS + i, yW) for i in range(1, L + 1)]  # approach W
+
+        # Entra N por (xN,yE) viniendo desde abajo en xN (carril N)
+        # Entra S por (xS,yW) viniendo desde arriba en xS (carril S)
+        vert_cells = []
+        vert_cells += [(xN, yE - i) for i in range(1, L + 1)]  # approach N
+        vert_cells += [(xS, yW + i) for i in range(1, L + 1)]  # approach S
+
+        q_h = cars_in_cells(horiz_cells)
+        q_v = cars_in_cells(vert_cells)
+        return q_h, q_v
+
+    def _update_lights_fixed(self):
+        groups = self._intersection_groups()
+        for key, agents in groups.items():
+            ref = agents[0]
+            ref.cycle = self.light_cycle
+            ref.t += 1
+            if ref.t >= ref.cycle:
+                ref.t = 0
+                ref.phase = 1 - ref.phase
+            for b in agents[1:]:
+                b.phase = ref.phase
+                b.t = ref.t
+                b.cycle = ref.cycle
+
+
+
+
+    def _update_lights_actuated(self):
+        """
+        Adaptive:
+        - Base fixed: alterna cada light_cycle
+        - Gap-out: si ya cumplio min_green_time, y el verde no tiene demanda,
+        pero el rojo si, entonces cambia antes.
+        """
+        groups = self._intersection_groups()
+
+        for key, agents in groups.items():
+            ref = agents[0]
+            q_h, q_v = self._count_queue_for_group(key)
+
+            # phase 0 => horizontal verde (E/W)
+            # phase 1 => vertical verde (N/S)
+            current = ref.phase
+            ref.cycle = self.light_cycle
+            ref.t += 1
+
+            cur_demand = q_h if current == 0 else q_v
+            oth_demand = q_v if current == 0 else q_h
+
+            # --- 1) Gap-out (cambio anticipado seguro) ---
+            if ref.t >= self.min_green_time:
+                if cur_demand == 0 and oth_demand > 0:
+                    ref.phase = 1 - ref.phase
+                    ref.t = 0
+
+            # --- 2) Fixed fallback (si no hubo gap-out) ---
+            if ref.t >= ref.cycle:
+                ref.t = 0
+                ref.phase = 1 - ref.phase
+
+            # Sync 2x2
+            for b in agents:
+                b.phase = ref.phase
+                b.t = ref.t
+                b.cycle = ref.cycle
+
     # ---- Métricas
 
     def count_cars(self) -> int:
@@ -392,6 +538,12 @@ class TrafficModel(Model):
         waits = [a.wait_time for a in self.schedule.agents if isinstance(a, CarAgent)]
         return sum(waits) / len(waits) if waits else 0.0
 
+    def avg_wait_seconds(self) -> float:
+        return self.avg_wait() * float(self.seconds_per_tick)
+
+    def avg_speed_cells_per_tick(self) -> float:
+        return self.avg_speed()
+
     def zone_density(self, zone_name: str) -> int:
         zone = next((z for z in self.zones if z.name == zone_name), None)
         if not zone:
@@ -403,7 +555,14 @@ class TrafficModel(Model):
 
     def step(self):
         self._try_spawn_cars()
-        self.schedule.step()
+        if self.signal_mode == "adaptive":
+            self._update_lights_actuated()
+        else:
+            self._update_lights_fixed()
+
+        cars = [a for a in list(self.schedule.agents) if isinstance(a, CarAgent)]
+        for car in cars:
+            car.step()
 
         if self.to_remove:
             for car in self.to_remove:
@@ -440,7 +599,6 @@ def agent_portrayal(agent):
     return {}
 
 
-# TODO: añadir unidades a las métricas del HUD
 class HUD(TextElement):
     def render(self, model: TrafficModel):
         h = model.minute_of_day // 60
@@ -467,6 +625,7 @@ def run_server():
             {"Label": "CarsActive"},
             {"Label": "AvgSpeed"},
             {"Label": "AvgWait"},
+            {"Label": "AvgWaitSeconds"},
             {"Label": "DensityCentro"},
             {"Label": "DensityRes"},
             {"Label": "DensityInd"},
@@ -486,6 +645,156 @@ def run_server():
     server.port = 8521
     server.launch()
 
+# ---- Matplotlib evaluation plots (fixed vs adaptive) ----
+def run_once_for_dataframe(
+    signal_mode: str,
+    steps: int = 600,
+    seed: int = 42,
+    base_spawn_scale: float = 1.0,
+    light_cycle: int = 12,
+    min_green_time: int = 4,
+    max_green_time: int = 30,
+    switch_threshold: int = 2,
+    detection_range: int = 4,
+):
+    """
+    Corre una simulación headless y regresa el DataFrame del DataCollector.
+    """
+    model = TrafficModel(width=30, height=30, seed=seed, base_spawn_scale=base_spawn_scale)
+
+    # Configuración del modo semáforos
+    model.signal_mode = signal_mode
+
+    model.light_cycle = light_cycle
+    model.min_green_time = min_green_time
+    model.max_green_time = max_green_time
+    model.switch_threshold = switch_threshold
+    model.detection_range = detection_range
+
+    for _ in range(steps):
+        model.step()
+
+    df = model.datacollector.get_model_vars_dataframe().copy()
+    return df
+
+
+def evaluate_kpi(avg_wait_seconds_mean: float, baseline_seconds: float = 60.0, target_reduction: float = 0.05):
+    """
+    KPI: lograr al menos -5% vs baseline 60s.
+    """
+    target_seconds = baseline_seconds * (1.0 - target_reduction)
+    improvement_pct = (baseline_seconds - avg_wait_seconds_mean) / baseline_seconds  # 0.05 = 5%
+    meets = avg_wait_seconds_mean <= target_seconds
+    return {
+        "baseline_seconds": baseline_seconds,
+        "target_seconds": target_seconds,
+        "mean_seconds": avg_wait_seconds_mean,
+        "improvement_pct": improvement_pct,
+        "meets_target": meets,
+    }
+
+
+def plot_wait_time_comparison(
+    steps: int = 600,
+    warmup: int = 100,
+    runs: int = 5,
+    baseline_seconds: float = 60.0,
+    target_reduction: float = 0.05,
+):
+    """
+    1) Serie de tiempo fixed vs adaptive (una corrida)
+    2) Barras: promedio (post-warmup) y std en varias corridas
+    """
+
+
+    target_seconds = baseline_seconds * (1.0 - target_reduction)
+
+    # Time-series de una corrida (misma seed para comparar)
+    df_fixed = run_once_for_dataframe("fixed", steps=steps, seed=42)
+    df_adap = run_once_for_dataframe("adaptive", steps=steps, seed=42)
+
+    # recortar warmup
+    s_fixed = df_fixed["AvgWaitSeconds"].iloc[warmup:].reset_index(drop=True)
+    s_adap = df_adap["AvgWaitSeconds"].iloc[warmup:].reset_index(drop=True)
+
+    # moving average simple para ver tendencia
+    win = 20
+    ma_fixed = s_fixed.rolling(win, min_periods=1).mean()
+    ma_adap = s_adap.rolling(win, min_periods=1).mean()
+
+    plt.figure()
+    plt.plot(s_fixed.values, linewidth=1, alpha=0.35, label="fixed (raw)")
+    plt.plot(s_adap.values, linewidth=1, alpha=0.35, label="adaptive (raw)")
+    plt.plot(ma_fixed.values, linewidth=2, label=f"fixed (MA{win})")
+    plt.plot(ma_adap.values, linewidth=2, label=f"adaptive (MA{win})")
+    plt.axhline(baseline_seconds, linewidth=2, linestyle="--", label="baseline CDMX = 60s")
+    plt.axhline(target_seconds, linewidth=2, linestyle=":", label=f"target = {target_seconds:.1f}s (-5%)")
+    plt.title("AvgWaitSeconds (post-warmup) — fixed vs adaptive")
+    plt.xlabel(f"Step (desde warmup={warmup})")
+    plt.ylabel("AvgWaitSeconds (s)")
+    plt.legend()
+    plt.tight_layout()
+
+    # Barras con varias corridas (semillas diferentes)
+    fixed_means = []
+    adap_means = []
+
+    for i in range(runs):
+        seed = 100 + i
+        dfx = run_once_for_dataframe("fixed", steps=steps, seed=seed)
+        dfa = run_once_for_dataframe("adaptive", steps=steps, seed=seed)
+
+        fixed_means.append(float(dfx["AvgWaitSeconds"].iloc[warmup:].mean()))
+        adap_means.append(float(dfa["AvgWaitSeconds"].iloc[warmup:].mean()))
+
+    fixed_means = np.array(fixed_means, dtype=float)
+    adap_means = np.array(adap_means, dtype=float)
+
+    means = np.array([fixed_means.mean(), adap_means.mean()])
+    stds = np.array([fixed_means.std(ddof=1) if runs > 1 else 0.0,
+                     adap_means.std(ddof=1) if runs > 1 else 0.0])
+
+    labels = ["fixed", "adaptive"]
+
+    plt.figure()
+    plt.bar(labels, means, yerr=stds, capsize=6)
+    plt.axhline(baseline_seconds, linewidth=2, linestyle="--", label="baseline CDMX = 60s")
+    plt.axhline(target_seconds, linewidth=2, linestyle=":", label=f"target = {target_seconds:.1f}s (-5%)")
+    plt.title(f"AvgWaitSeconds mean±std (post-warmup) — {runs} runs")
+    plt.ylabel("AvgWaitSeconds (s)")
+    plt.legend()
+    plt.tight_layout()
+
+    # KPI summary (con el promedio del modo adaptive)
+    kpi = evaluate_kpi(means[1], baseline_seconds=baseline_seconds, target_reduction=target_reduction)
+    print("\n=== KPI (Adaptive) ===")
+    print(f"Baseline: {kpi['baseline_seconds']:.1f}s")
+    print(f"Target (-5%): {kpi['target_seconds']:.1f}s")
+    print(f"Mean adaptive: {kpi['mean_seconds']:.2f}s")
+    print(f"Improvement: {kpi['improvement_pct']*100:.2f}%")
+    print(f"Meets target? {'YES' if kpi['meets_target'] else 'NO'}")
+
+    plt.show()
+
+
+# ejemplo de uso:
+# python traffic_classic.py --mode plots --steps 600 --warmup 100 --runs 5
+# o para correr la simulacion sola en el servidor:
+# python traffic_classic.py --mode server
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["server", "plots"], default="server")
+    parser.add_argument("--steps", type=int, default=600)
+    parser.add_argument("--warmup", type=int, default=100)
+    parser.add_argument("--runs", type=int, default=5)
+    args = parser.parse_args()
+
+    if args.mode == "plots":
+        plot_wait_time_comparison(steps=args.steps, warmup=args.warmup, runs=args.runs)
+    else:
+        run_server()
 
 if __name__ == "__main__":
     run_server()

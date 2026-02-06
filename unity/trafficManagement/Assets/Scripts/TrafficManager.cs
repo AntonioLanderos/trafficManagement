@@ -2,6 +2,8 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.UI;
+using TMPro;
 
 public class TrafficManager : MonoBehaviour
 {
@@ -10,9 +12,7 @@ public class TrafficManager : MonoBehaviour
 
     [Header("Prefabs")]
     public GameObject carPrefab;
-
     public GameObject trafficLightPrefab;
-
     public GameObject roadTilePrefab;
     public GameObject intersectionTilePrefab;
 
@@ -28,15 +28,18 @@ public class TrafficManager : MonoBehaviour
     public float lerpSpeed = 12f;
 
     [Header("UI")]
-    public TMPro.TextMeshProUGUI metricsText;
+    public TextMeshProUGUI metricsText;
+    public Slider cycleSlider;
+    public Slider spawnScaleSlider;
+    public TMP_Dropdown modeDropdown;
+    public Button applyConfigButton;
+    public Button resetButton;
+    public Button captureBaselineButton;
 
     [Header("Lights (Directional)")]
-    public bool directionalLights = true;
-
-    // Qué tanto separar los indicadores EW/NS dentro de la intersección
+    public bool directionalLights = false;
     public float lightSeparation = 0.45f;
 
-    // ---------------- Runtime state
     private bool mapBuilt = false;
     private Transform mapRoot;
     private Transform carsRoot;
@@ -45,14 +48,12 @@ public class TrafficManager : MonoBehaviour
     private readonly Dictionary<int, GameObject> carGO = new Dictionary<int, GameObject>();
     private readonly Dictionary<int, Vector3> carTargetPos = new Dictionary<int, Vector3>();
 
-    // Modo viejo (1 GO por celda light id)
-    private readonly Dictionary<int, GameObject> lightGO = new Dictionary<int, GameObject>();
-
-    // Modo nuevo: 2 indicadores por intersección (EW y NS)
+    private readonly Dictionary<int, GameObject> lightLegacyGO = new Dictionary<int, GameObject>();
     private readonly Dictionary<string, GameObject> lightEW = new Dictionary<string, GameObject>();
     private readonly Dictionary<string, GameObject> lightNS = new Dictionary<string, GameObject>();
 
-    // ---------------- DTOs (JsonUtility compatible) ----------------
+    private float baselineAvgWaitSeconds = -1f;
+    private float lastAvgWaitSeconds = 0f;
 
     [System.Serializable]
     public class CarDTO
@@ -81,9 +82,15 @@ public class TrafficManager : MonoBehaviour
         public int height;
         public CarDTO[] cars;
         public LightDTO[] lights;
+
         public int count_cars;
         public float avg_speed;
         public float avg_wait;
+        public float avg_wait_seconds;
+        public float seconds_per_tick;
+
+        public string signal_mode;
+        public int light_cycle;
     }
 
     [System.Serializable]
@@ -112,13 +119,23 @@ public class TrafficManager : MonoBehaviour
         public IntersectionCellDTO[] intersections;
     }
 
-    // ---------------- Unity lifecycle ----------------
+    [System.Serializable]
+    public class ConfigDTO
+    {
+        public string signal_mode;
+        public int light_cycle;
+        public float base_spawn_scale;
+    }
 
     void Start()
     {
         mapRoot = new GameObject("MapRoot").transform;
         carsRoot = new GameObject("CarsRoot").transform;
         lightsRoot = new GameObject("LightsRoot").transform;
+
+        if (applyConfigButton != null) applyConfigButton.onClick.AddListener(ApplyConfigFromUI);
+        if (resetButton != null) resetButton.onClick.AddListener(ResetSimulation);
+        if (captureBaselineButton != null) captureBaselineButton.onClick.AddListener(CaptureBaseline);
 
         StartCoroutine(InitThenLoop());
     }
@@ -127,7 +144,6 @@ public class TrafficManager : MonoBehaviour
     {
         if (!smooth) return;
 
-        // Suavizado: mueve carros hacia su target
         foreach (var kv in carGO)
         {
             int id = kv.Key;
@@ -154,8 +170,6 @@ public class TrafficManager : MonoBehaviour
             yield return new WaitForSeconds(requestEverySeconds);
         }
     }
-
-    // ---------------- Networking ----------------
 
     IEnumerator FetchAndBuildMap()
     {
@@ -197,7 +211,6 @@ public class TrafficManager : MonoBehaviour
     {
         if (!mapBuilt) yield break;
 
-        // POST "/" con body "{}" para avanzar 1 tick
         string postUrl = url.TrimEnd('/');
 
         using (UnityWebRequest req = new UnityWebRequest(postUrl, "POST"))
@@ -229,19 +242,17 @@ public class TrafficManager : MonoBehaviour
                 yield break;
             }
 
-            //Debug.Log($"Metrics - Cars: {snap.count_cars} | AvgSpeed: {snap.avg_speed} | AvgWait: {snap.avg_wait}");
-
-            UpdateMetricsUI(snap);
             UpdateCars(snap);
 
             if (directionalLights)
                 UpdateLightsDirectional(snap);
             else
                 UpdateLightsLegacy(snap);
+
+            lastAvgWaitSeconds = snap.avg_wait_seconds;
+            UpdateMetricsText(snap);
         }
     }
-
-    // ---------------- Map building ----------------
 
     void BuildMap(MapDTO map)
     {
@@ -251,7 +262,6 @@ public class TrafficManager : MonoBehaviour
             return;
         }
 
-        // Intersections primero
         if (map.intersections != null)
         {
             foreach (var c in map.intersections)
@@ -271,16 +281,6 @@ public class TrafficManager : MonoBehaviour
                 tile.name = $"R_{c.x}_{c.y}";
             }
         }
-    }
-
-    // ---------------- Entity updates ----------------
-    void UpdateMetricsUI(SnapshotDTO snap)
-    {
-        if (metricsText == null) return;
-
-        metricsText.text = $"Autos: {snap.count_cars}\n" +
-                           $"Vel. Promedio: {snap.avg_speed:F2}\n" +
-                           $"Espera Promedio: {snap.avg_wait:F1} ticks";
     }
 
     void UpdateCars(SnapshotDTO snap)
@@ -319,7 +319,6 @@ public class TrafficManager : MonoBehaviour
             }
         }
 
-        // Remover carros que ya no existen
         List<int> toRemove = new List<int>();
         foreach (var kv in carGO)
         {
@@ -354,24 +353,24 @@ public class TrafficManager : MonoBehaviour
                 seen.Add(l.id);
 
                 Vector3 pos = GridToWorld(l.x, l.y) + new Vector3(0f, 0.5f, 0f);
-                if (!lightGO.ContainsKey(l.id) || lightGO[l.id] == null)
+                if (!lightLegacyGO.ContainsKey(l.id) || lightLegacyGO[l.id] == null)
                 {
                     GameObject go = Instantiate(trafficLightPrefab, lightsRoot);
                     go.name = $"Light_{l.id}";
                     go.transform.position = pos;
-                    lightGO[l.id] = go;
+                    lightLegacyGO[l.id] = go;
                 }
                 else
                 {
-                    lightGO[l.id].transform.position = pos;
+                    lightLegacyGO[l.id].transform.position = pos;
                 }
 
-                ApplyLightVisual(lightGO[l.id], l.phase);
+                ApplyLightVisual(lightLegacyGO[l.id], l.phase);
             }
         }
 
         List<int> toRemove = new List<int>();
-        foreach (var kv in lightGO)
+        foreach (var kv in lightLegacyGO)
         {
             int id = kv.Key;
             if (!seen.Contains(id))
@@ -382,122 +381,215 @@ public class TrafficManager : MonoBehaviour
         }
         foreach (int id in toRemove)
         {
-            lightGO.Remove(id);
+            lightLegacyGO.Remove(id);
         }
     }
-
-    // ---------------- Lights: directional ----------------
-    // Agrupa los 4 lights (2x2) en una sola intersección y crea 2 indicadores: EW y NS
 
     void UpdateLightsDirectional(SnapshotDTO snap)
     {
-        // Si no hay prefab, usamos cubos automáticamente para testing
+        if (trafficLightPrefab == null)
+        {
+            Debug.LogError("Traffic Light Prefab not assigned.");
+            return;
+        }
+
         HashSet<string> seenKeys = new HashSet<string>();
 
-        if (snap.lights == null) return;
-
-        // Guardar phase por intersección
-        Dictionary<string, int> phaseByKey = new Dictionary<string, int>();
-        Dictionary<string, Vector3> centerByKey = new Dictionary<string, Vector3>();
-
-        foreach (var l in snap.lights)
+        if (snap.lights != null)
         {
-            string key = IntersectionKey2x2(l.x, l.y);
-            seenKeys.Add(key);
-
-            phaseByKey[key] = l.phase;
-
-            Vector2Int baseCell = IntersectionBaseCell2x2(l.x, l.y);
-
-            Vector3 center = GridToWorld(baseCell.x, baseCell.y);
-            center += new Vector3(cellSize * 0.5f, 0f, cellSize * 0.5f);
-            centerByKey[key] = center;
-        }
-
-        foreach (var kv in phaseByKey)
-        {
-            string key = kv.Key;
-            int phase = kv.Value;
-
-            Vector3 center = centerByKey[key];
-
-            // Separación visual para distinguir dirección
-            float sep = cellSize * lightSeparation;
-
-            // EW a la derecha del centro, NS arriba del centro (en Z)
-            // EW = sobre la horizontal (Z casi igual), NS = sobre la vertical (X casi igual)
-            Vector3 posEW = center + new Vector3(0f, 0.5f, sep);
-            Vector3 posNS = center + new Vector3(sep, 0.5f, 0f);
-
-
-            // EW indicator
-            if (!lightEW.ContainsKey(key) || lightEW[key] == null)
+            foreach (var l in snap.lights)
             {
-                lightEW[key] = CreateLightGO($"LightEW_{key}");
-                lightEW[key].transform.SetParent(lightsRoot);
-            }
-            lightEW[key].transform.position = posEW;
+                int gx = l.x - (l.x % 2);
+                int gy = l.y - (l.y % 2);
+                string key = gx + "_" + gy;
 
-            // NS indicator
-            if (!lightNS.ContainsKey(key) || lightNS[key] == null)
+                if (seenKeys.Contains(key)) continue;
+                seenKeys.Add(key);
+
+                int phase = l.phase;
+                Vector3 center = GridToWorld(gx, gy);
+
+                Vector3 posEW = center + new Vector3(0f, 0.5f, lightSeparation);
+                Vector3 posNS = center + new Vector3(lightSeparation, 0.5f, 0f);
+
+                if (!lightEW.ContainsKey(key) || lightEW[key] == null)
+                {
+                    GameObject go = Instantiate(trafficLightPrefab, lightsRoot);
+                    go.name = $"Light_EW_{key}";
+                    lightEW[key] = go;
+                }
+                if (!lightNS.ContainsKey(key) || lightNS[key] == null)
+                {
+                    GameObject go = Instantiate(trafficLightPrefab, lightsRoot);
+                    go.name = $"Light_NS_{key}";
+                    lightNS[key] = go;
+                }
+
+                lightEW[key].transform.position = posEW;
+                lightNS[key].transform.position = posNS;
+
+                int phaseEW = (phase == 0) ? 0 : 1;
+                int phaseNS = (phase == 0) ? 1 : 0;
+
+                ApplyLightVisual(lightEW[key], phaseEW);
+                ApplyLightVisual(lightNS[key], phaseNS);
+            }
+        }
+
+        List<string> rm = new List<string>();
+        foreach (var kv in lightEW)
+        {
+            if (!seenKeys.Contains(kv.Key))
             {
-                lightNS[key] = CreateLightGO($"LightNS_{key}");
-                lightNS[key].transform.SetParent(lightsRoot);
+                if (kv.Value != null) Destroy(kv.Value);
+                rm.Add(kv.Key);
             }
-            lightNS[key].transform.position = posNS;
-
-            bool ewGreen = (phase == 0);
-            bool nsGreen = !ewGreen;
-
-            SetLightColor(lightEW[key], ewGreen ? Color.green : Color.red);
-            SetLightColor(lightNS[key], nsGreen ? Color.green : Color.red);
         }
-    }
+        foreach (var k in rm) lightEW.Remove(k);
 
-    GameObject CreateLightGO(string name)
-    {
-        GameObject go;
-
-        if (trafficLightPrefab != null)
+        rm.Clear();
+        foreach (var kv in lightNS)
         {
-            go = Instantiate(trafficLightPrefab);
+            if (!seenKeys.Contains(kv.Key))
+            {
+                if (kv.Value != null) Destroy(kv.Value);
+                rm.Add(kv.Key);
+            }
         }
-        else
+        foreach (var k in rm) lightNS.Remove(k);
+    }
+
+    void UpdateMetricsText(SnapshotDTO snap)
+    {
+        if (metricsText == null) return;
+
+        string impStr = "N/A";
+        if (baselineAvgWaitSeconds > 0f)
         {
-            go = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            go.transform.localScale = new Vector3(0.6f, 0.6f, 0.6f);
+            float improvement = (baselineAvgWaitSeconds - snap.avg_wait_seconds) / baselineAvgWaitSeconds * 100f;
+            impStr = improvement.ToString("0.0") + "%";
         }
 
-        go.name = name;
-        return go;
+        metricsText.text =
+            "Tick: " + snap.tick +
+            "\nCars: " + snap.count_cars +
+            "\nAvgWait (ticks): " + snap.avg_wait.ToString("0.0") +
+            "\nAvgWait (sec): " + snap.avg_wait_seconds.ToString("0.00") +
+            "\nBaseline (sec): " + (baselineAvgWaitSeconds > 0f ? baselineAvgWaitSeconds.ToString("0.00") : "N/A") +
+            "\nImprovement: " + impStr +
+            "\nMode: " + snap.signal_mode +
+            "\nCycle: " + snap.light_cycle;
     }
 
-    void SetLightColor(GameObject go, Color c)
+    public void CaptureBaseline()
     {
-        if (go == null) return;
+        baselineAvgWaitSeconds = lastAvgWaitSeconds;
+        Debug.Log("Baseline captured: " + baselineAvgWaitSeconds.ToString("0.00") + " sec");
+    }
 
-        var mr = go.GetComponentInChildren<MeshRenderer>();
-        if (mr != null && mr.material != null)
+    public void ApplyConfigFromUI()
+    {
+        string mode = "fixed";
+        if (modeDropdown != null)
         {
-            mr.material.color = c;
+            mode = (modeDropdown.value == 0) ? "fixed" : "adaptive";
+        }
+
+        int cycle = (cycleSlider != null) ? Mathf.RoundToInt(cycleSlider.value) : 12;
+        float spawn = (spawnScaleSlider != null) ? spawnScaleSlider.value : 1f;
+
+        StartCoroutine(PostConfig(mode, cycle, spawn));
+    }
+
+    IEnumerator PostConfig(string mode, int cycle, float spawnScale)
+    {
+        string configUrl = url.TrimEnd('/') + "/config";
+        ConfigDTO cfg = new ConfigDTO { signal_mode = mode, light_cycle = cycle, base_spawn_scale = spawnScale };
+        string json = JsonUtility.ToJson(cfg);
+
+        using (UnityWebRequest req = new UnityWebRequest(configUrl, "POST"))
+        {
+            byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(json);
+            req.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            req.downloadHandler = new DownloadHandlerBuffer();
+            req.SetRequestHeader("Content-Type", "application/json");
+            req.SetRequestHeader("Accept", "application/json");
+
+            yield return req.SendWebRequest();
+
+#if UNITY_2020_2_OR_NEWER
+            if (req.result != UnityWebRequest.Result.Success)
+#else
+            if (req.isNetworkError || req.isHttpError)
+#endif
+            {
+                Debug.LogError("Config POST error: " + req.error);
+                Debug.LogError(req.downloadHandler.text);
+            }
         }
     }
 
-    string IntersectionKey2x2(int x, int y)
+    public void ResetSimulation()
     {
-        int bx = (x % 2 == 0) ? x : x - 1;
-        int by = (y % 2 == 0) ? y : y - 1;
-        return $"{bx}_{by}";
+        baselineAvgWaitSeconds = -1f;
+        StartCoroutine(PostReset());
     }
 
-    Vector2Int IntersectionBaseCell2x2(int x, int y)
+    IEnumerator PostReset()
     {
-        int bx = (x % 2 == 0) ? x : x - 1;
-        int by = (y % 2 == 0) ? y : y - 1;
-        return new Vector2Int(bx, by);
+        string resetUrl = url.TrimEnd('/') + "/reset";
+
+        using (UnityWebRequest req = new UnityWebRequest(resetUrl, "POST"))
+        {
+            byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes("{}");
+            req.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            req.downloadHandler = new DownloadHandlerBuffer();
+            req.SetRequestHeader("Content-Type", "application/json");
+            req.SetRequestHeader("Accept", "application/json");
+
+            yield return req.SendWebRequest();
+
+#if UNITY_2020_2_OR_NEWER
+            if (req.result != UnityWebRequest.Result.Success)
+#else
+            if (req.isNetworkError || req.isHttpError)
+#endif
+            {
+                Debug.LogError("Reset POST error: " + req.error);
+                Debug.LogError(req.downloadHandler.text);
+                yield break;
+            }
+
+            ClearRuntimeObjects();
+            mapBuilt = false;
+
+            yield return FetchAndBuildMap();
+        }
     }
 
-    // ---------------- Helpers ----------------
+    void ClearRuntimeObjects()
+    {
+        foreach (var kv in carGO) if (kv.Value != null) Destroy(kv.Value);
+        carGO.Clear();
+        carTargetPos.Clear();
+
+        foreach (var kv in lightLegacyGO) if (kv.Value != null) Destroy(kv.Value);
+        lightLegacyGO.Clear();
+
+        foreach (var kv in lightEW) if (kv.Value != null) Destroy(kv.Value);
+        lightEW.Clear();
+
+        foreach (var kv in lightNS) if (kv.Value != null) Destroy(kv.Value);
+        lightNS.Clear();
+
+        if (mapRoot != null) Destroy(mapRoot.gameObject);
+        if (carsRoot != null) Destroy(carsRoot.gameObject);
+        if (lightsRoot != null) Destroy(lightsRoot.gameObject);
+
+        mapRoot = new GameObject("MapRoot").transform;
+        carsRoot = new GameObject("CarsRoot").transform;
+        lightsRoot = new GameObject("LightsRoot").transform;
+    }
 
     Vector3 GridToWorld(int x, int y)
     {
@@ -509,7 +601,6 @@ public class TrafficManager : MonoBehaviour
 
     Quaternion DirToRotation(string dir)
     {
-        // el carro mira hacia +Z por defecto
         switch (dir)
         {
             case "N": return Quaternion.Euler(0f, 0f, 0f);

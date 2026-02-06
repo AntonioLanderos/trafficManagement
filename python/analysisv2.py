@@ -47,39 +47,39 @@ def run_optimization_analysis(
     print(f"--- ANÁLISIS DE TRÁFICO ROBUSTO (CDMX) ---")
     print(f"Meta: Reducir espera un 5% (Target: < {target_wait_seconds * 0.95:.2f}s)")
     
-    # OBTENER BASELINE (Ciclo 12)
+    # obtener baseline (Ciclo 12)
     print(f"\n1. Estableciendo Línea Base (Ciclo {baseline_cycle})")
     base_series_ticks, base_avg_ticks = run_batch_simulation(baseline_cycle, simulation_steps, warmup_steps, iterations_per_config)
     
-    # CALIBRACIÓN DE TIEMPO (Ticks -> Segundos)
+    # calibración de tiempo (de ticks a segundos reales)
     # Factor = 60s / Promedio_Ticks_Baseline
     time_factor = target_wait_seconds / base_avg_ticks
     print(f"   -> Calibración: 1 Tick ≈ {time_factor:.2f} segundos reales.")
 
-    # Convertimos el baseline a segundos
+    # convertimos el baseline a segundos
     base_series_sec = base_series_ticks * time_factor
     base_avg_sec = base_avg_ticks * time_factor
     target_sec = base_avg_sec * 0.95 # Meta del 5%
     
     results_summary = []
     
-    # Guardamos datos para graficar líneas
+    # guardamos datos para graficar líneas
     lines_data = {f"Base ({baseline_cycle})": base_series_sec}
     
-    # CORRER EXPERIMENTOS
+    # correr experimientos
     
     for cycle in test_cycles:
         if cycle == baseline_cycle:
-            # Ya tenemos este dato, solo lo registramos
+            # ya tenemos este dato, solo lo registramos
             avg_wait_sec = base_avg_sec
         else:
             series_ticks, avg_ticks = run_batch_simulation(cycle, simulation_steps, warmup_steps, iterations_per_config)
-            # Convertir a segundos usando EL MISMO factor del baseline
+            # convertir a segundos usando EL MISMO factor del baseline
             series_sec = series_ticks * time_factor
             avg_wait_sec = avg_ticks * time_factor
             lines_data[f"Ciclo {cycle}"] = series_sec
         
-        # Calcular mejora
+        # calcular mejora
         pct_change = ((avg_wait_sec - base_avg_sec) / base_avg_sec) * 100
         cumple = avg_wait_sec <= target_sec
         
@@ -90,26 +90,26 @@ def run_optimization_analysis(
             "Cumple Meta": cumple
         })
 
-    # Convertir resumen a DataFrame para fácil manejo
+    # convertir resumen a DataFrame para fácil manejo
     df_res = pd.DataFrame(results_summary)
     
-    # VISUALIZACIÓN
+    # visualización
     fig = plt.figure(figsize=(14, 10))
     gs = fig.add_gridspec(2, 2)
 
-    # GRÁFICA 1 Series de Tiempo
+    # gráfica 1 series de tiempo
     ax1 = fig.add_subplot(gs[0, :])
     
     x_axis = np.arange(len(base_series_sec))
     
-    # Graficamos Baseline
+    # graficamos Baseline
     ax1.plot(x_axis, base_series_sec, color='black', linewidth=2, label=f'Baseline ({baseline_cycle})', zorder=10)
     ax1.axhline(y=target_sec, color='green', linestyle='--', linewidth=2, label='Meta (-5%)')
     
-    # Graficamos los demás
+    # graficamos los demás
     for name, data in lines_data.items():
         if "Base" in name: continue
-        # Usamos rolling mean para suavizar
+        # usamos rolling mean para suavizar
         smooth_data = pd.Series(data).rolling(window=20).mean()
         ax1.plot(x_axis, smooth_data, alpha=0.7, label=name)
         
@@ -119,13 +119,13 @@ def run_optimization_analysis(
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
 
-    # GRÁFICA 2 Comparativa de Barras
+    # gráfica 2 de barras
     ax2 = fig.add_subplot(gs[1, 0])
     
     colors = ['green' if x else 'red' for x in df_res["Cumple Meta"]]
     bars = ax2.bar(df_res["Ciclo"].astype(str), df_res["Espera Promedio (s)"], color=colors, alpha=0.7)
     
-    # Línea de referencia del baseline
+    # línea de referencia del baseline
     ax2.axhline(y=base_avg_sec, color='black', linestyle='-', linewidth=1, label='Actual')
     ax2.axhline(y=target_sec, color='green', linestyle='--', linewidth=1.5, label='Meta')
     
@@ -134,10 +134,10 @@ def run_optimization_analysis(
     ax2.set_xlabel('Configuración de Semáforo (Steps)')
     ax2.bar_label(bars, fmt='%.1f s', padding=3)
 
-    # GRÁFICA 3 Porcentaje de Mejora
+    # gráfica 3 porcentaje de mejora
     ax3 = fig.add_subplot(gs[1, 1])
     
-    # Invertimos el signo para que "bajar tiempo" sea positivo
+    # invertimos el signo para que "bajar tiempo" sea positivo
     mejoras = -df_res["Cambio %"] 
     colors_mejora = ['green' if x > 5 else 'gray' for x in mejoras]
     
@@ -153,7 +153,7 @@ def run_optimization_analysis(
     plt.tight_layout()
     plt.show()
 
-    # RESULTADO FINAL TEXTO
+    # resultado final
     print("\n" + "="*40)
     print("RESUMEN DE RESULTADOS")
     print("="*40)
